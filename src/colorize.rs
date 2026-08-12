@@ -151,6 +151,10 @@ fn recolor_file(
                 if let Some((name, class_value)) = property::text_class(tag, value) {
                     // Save translated class name
                     class_values.push((name, class_value));
+                    out.push_str(tag);
+                    out.push('=');
+                    out.push_str(&value);
+                    out.push_str(eol);
                     continue;
                 }
                 if let Some(suffix) = property::text_for(tag, &class_values) {
