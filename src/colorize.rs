@@ -40,6 +40,8 @@ pub fn run<T: BufRead + Seek>(
     out_dir: &Path,
     lang: &str,
     damage_colors: DamageColors,
+    with_non_damage: bool,
+    with_class_names: bool,
 ) {
     let colors = color_map(dbs);
 
@@ -63,7 +65,7 @@ pub fn run<T: BufRead + Seek>(
                 continue;
             }
             let text = String::from_utf8_lossy(&record.data);
-            let (rewritten, colored) = recolor_file(&text, &colors, damage_colors);
+            let (rewritten, colored) = recolor_file(&text, &colors, damage_colors, with_non_damage, with_class_names);
             if colored == 0 {
                 continue;
             }
@@ -101,9 +103,12 @@ fn recolor_file(
     text: &str,
     colors: &HashMap<String, char>,
     damage_colors: DamageColors,
+    with_non_damage: bool,
+    with_class_names: bool,
 ) -> (String, usize) {
     let mut out = String::with_capacity(text.len());
     let mut colored = 0usize;
+    let mut class_values: Vec<(String, String)> = Vec::new();
     for segment in text.split_inclusive('\n') {
         let (line, eol) = split_eol(segment);
         if let Some((tag, value)) = line.split_once('=') {
@@ -127,6 +132,42 @@ fn recolor_file(
                 out.push_str(&new_value);
                 out.push_str(eol);
                 continue;
+            }
+            if with_non_damage {
+                if let Some(color) = property::color_other_for(tag)
+                {
+                    let new_value = apply_color(value, color);
+                    if new_value != value {
+                        colored += 1;
+                    }
+                    out.push_str(tag);
+                    out.push('=');
+                    out.push_str(&new_value);
+                    out.push_str(eol);
+                    continue;
+                }
+            }
+            if with_class_names {
+                if let Some((name, class_value)) = property::text_class(tag, value) {
+                    // Save translated class name
+                    class_values.push((name, class_value));
+                    out.push_str(tag);
+                    out.push('=');
+                    out.push_str(&value);
+                    out.push_str(eol);
+                    continue;
+                }
+                if let Some(suffix) = property::text_for(tag, &class_values) {
+                    let new_value = format!("{value} {suffix}");
+                    if new_value != value {
+                        colored += 1;
+                    }
+                    out.push_str(tag);
+                    out.push('=');
+                    out.push_str(&new_value);
+                    out.push_str(eol);
+                    continue;
+                }
             }
         }
         out.push_str(segment);

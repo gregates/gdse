@@ -19,6 +19,7 @@ pub const WHITE: char = 'w';
 pub const YELLOW: char = 'y';
 /// `10EB5D`
 pub const GREEN: char = 'g';
+pub const DARK_GREEN: char = 'x';
 /// `F1E78C`
 pub const KHAKI: char = 'k';
 /// `FF69B5`
