@@ -12,8 +12,10 @@
 //! no element token and so are left untouched.
 
 use crate::palette::{
-    AQUA, COBALT, CYAN, FUSHIA, KHAKI, MAROON, OLIVE, ORANGE, PURPLE, RED, YELLOW,
+    AQUA, COBALT, CYAN, FUSHIA, HIGHLIGHT_ORANGE, KHAKI, MAROON, OLIVE, ORANGE,
+    PURPLE, RED, TEAL, YELLOW,
 };
+use crate::user_palette::UserPalette;
 
 /// Structural prefixes that mark a damage / resistance / retaliation /
 /// conversion stat label. A property tag always starts with one of these.
@@ -61,7 +63,7 @@ const TOKENS: [(&str, char); 12] = [
 ];
 
 /// The color letter for a damage-type Property tag, or `None` if `tag` isn't one.
-pub fn color_for(tag: &str, damage_colors: DamageColors) -> Option<char> {
+pub fn color_for(tag: &str, damage_colors: DamageColors, user_palette: &UserPalette) -> Option<char> {
     if !PREFIXES.iter().any(|p| tag.starts_with(p)) {
         return None;
     }
@@ -96,11 +98,93 @@ pub fn color_for(tag: &str, damage_colors: DamageColors) -> Option<char> {
     let color = TOKENS
         .iter()
         .find(|(tok, _)| tag.contains(tok))
-        .map(|(_, color)| *color)?;
+        .map(|(tok, color)| user_palette.damage(tok).unwrap_or(*color))?;
     // Opt back in to Full Rainbow's Red Pierce. Fushia is the only entry gdse
     // departs on, so folding it back to Red is the whole of the flag.
     if damage_colors == DamageColors::RainbowFilter && color == FUSHIA {
         return Some(RED);
     }
     Some(color)
+}
+
+// Additional non-damage stat labels that benefit from consistent coloring.
+const PREFIXES_OTHER: [&str; 4] = [
+    "tagChar",
+    "tagDamageModifier",
+    "ItemMasteryIncrement",
+    "ItemAllSkillIncrement",
+];
+
+const TOKENS_OTHER: [(&str, &str, Option<char>); 13] = [
+    ("tagCharAttribute0", "nondamage.attribute0", Some(HIGHLIGHT_ORANGE)),
+    (
+        "ItemMasteryIncrement",
+        "nondamage.mastery_increment",
+        Some(TEAL),
+    ),
+    (
+        "ItemAllSkillIncrement",
+        "nondamage.all_skill_increment",
+        Some(TEAL),
+    ),
+    ("tagCharRunSpeed", "nondamage.run_speed", None),
+    ("tagCharSpellCastSpeed", "nondamage.cast_speed", None),
+    ("tagCharAttackSpeed", "nondamage.attack_speed", None),
+    ("tagCharTotalSpeedModifier", "nondamage.total_speed", None),
+    (
+        "tagCharRunSpeedModifier",
+        "nondamage.run_speed_modifier",
+        None,
+    ),
+    ("tagCharOffensiveAbility", "nondamage.offensive_ability", None),
+    ("tagCharDefensiveAbility", "nondamage.defensive_ability", None),
+    ("tagDamageModifierCritDamage", "nondamage.crit_damage", None),
+    ("tagDamageModifierDamageMult", "nondamage.damage_mult", None),
+    ("tagDamageModifierTotalDamage", "nondamage.total_damage", None),
+];
+
+pub fn color_other_for(tag: &str, user_palette: &UserPalette) -> Option<char> {
+    if !PREFIXES_OTHER.iter().any(|p| tag.starts_with(p)) {
+        return None;
+    }
+    TOKENS_OTHER
+        .iter()
+        .find(|(tok, _, _)| tag.contains(tok))
+        .and_then(|(_, key, default)| user_palette.non_damage(key).or(*default))
+}
+
+const CLASSES: [&str; 4] = ["tagClass", "tagGDX1Class", "tagGDX2Class", "tagGDX3Class"];
+
+pub fn text_class(tag: &str, value: &str) -> Option<(String, String)> {
+    match tag {
+        "tagSkillClassName01" => Some(("Class01Skill".to_string(), value.to_string())),
+        "tagSkillClassName02" => Some(("Class02Skill".to_string(), value.to_string())),
+        "tagSkillClassName03" => Some(("Class03Skill".to_string(), value.to_string())),
+        "tagSkillClassName04" => Some(("Class04Skill".to_string(), value.to_string())),
+        "tagSkillClassName05" => Some(("Class05Skill".to_string(), value.to_string())),
+        "tagSkillClassName06" => Some(("Class06Skill".to_string(), value.to_string())),
+        "tagSkillClassName07" => Some(("Class07Skill".to_string(), value.to_string())),
+        "tagSkillClassName08" => Some(("Class08Skill".to_string(), value.to_string())),
+        "tagSkillClassName09" => Some(("Class09Skill".to_string(), value.to_string())),
+        "tagSkillClassName10" => Some(("Class10Skill".to_string(), value.to_string())),
+        _ => None,
+    }
+}
+
+pub fn text_for(tag: &str, class_values: &[(String, String)]) -> Option<String> {
+    if !CLASSES.iter().any(|p| tag.starts_with(p)) {
+        return None;
+    }
+    if !tag.contains("Name") {
+        return None;
+    }
+    // This contains the class name itself, not a skill.
+    if tag.contains("SkillName00A") {
+        return None;
+    }
+    let class = class_values
+        .iter()
+        .find(|(tok, _)| tag.contains(tok))
+        .map(|(_, class)| class)?;
+    Some(format!("({class})"))
 }

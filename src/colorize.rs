@@ -7,7 +7,7 @@
 //! WanezGD's placement cascade), and any file that changed is written whole —
 //! comments, Desc lines and untouched tags preserved — to the output directory.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Seek};
 use std::path::Path;
 
@@ -18,6 +18,7 @@ use crate::color;
 use crate::db::install_path;
 use crate::infer;
 use crate::property::{self, DamageColors};
+use crate::user_palette::UserPalette;
 
 /// The text bundles for a language, base game + expansions, in load order. EN
 /// ships one arc per part; other languages bundle everything into the base arc
@@ -33,6 +34,90 @@ fn text_arcs(lang: &str) -> [String; 4] {
     ]
 }
 
+/// Best-effort patch-version detection from decoded tag text.
+///
+/// Looks for comment markers like `#Patch v1.3.1` inside `tags*.txt` records
+/// from the language text archives and returns distinct discovered versions.
+pub fn detect_patch_versions(lang: &str) -> Vec<String> {
+    let base = install_path();
+    let mut versions = BTreeSet::new();
+
+    for rel in text_arcs(lang) {
+        let Ok(mut arc) = Archive::open(base.join(&rel)) else {
+            continue;
+        };
+        let Ok(records) = arc.iter_records() else {
+            continue;
+        };
+        for record in records.flatten() {
+            if !record.id.contains("tag") || !record.id.ends_with(".txt") {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&record.data);
+            for line in text.lines() {
+                if let Some(v) = parse_patch_version(line) {
+                    versions.insert(v.to_string());
+                }
+            }
+        }
+    }
+
+    versions.into_iter().collect()
+}
+
+fn parse_patch_version(line: &str) -> Option<&str> {
+    // Most releases use comment markers like `#Patch v1.3.1`, but some builds
+    // may use other words such as `Hotfix` or `Update`.
+    let lower = line.to_ascii_lowercase();
+    let marker_idx = ["#patch", "#hotfix", "#update"]
+        .iter()
+        .filter_map(|m| lower.find(m))
+        .min()?;
+
+    let tail = line[marker_idx..].trim();
+    extract_version_token(tail)
+}
+
+fn extract_version_token(s: &str) -> Option<&str> {
+    for raw in s.split_whitespace() {
+        let trimmed = raw.trim_matches(|c: char| ",;:()[]{}\"'".contains(c));
+        let core = trimmed
+            .strip_prefix('v')
+            .or_else(|| trimmed.strip_prefix('V'))
+            .unwrap_or(trimmed);
+        if is_versionish(core) {
+            return Some(core);
+        }
+    }
+    None
+}
+
+fn is_versionish(s: &str) -> bool {
+    let mut chars = s.chars().peekable();
+    let mut saw_dot = false;
+    let mut saw_digit = false;
+    let mut starts_with_digit = false;
+
+    if let Some(c) = chars.peek().copied() {
+        starts_with_digit = c.is_ascii_digit();
+    }
+
+    for c in chars {
+        if c.is_ascii_digit() {
+            saw_digit = true;
+        } else if c == '.' {
+            saw_dot = true;
+        } else if c == '-' || c == '_' || c.is_ascii_alphabetic() {
+            // Allow suffixes like 1.3.1a or 1.3.1-hotfix.
+            continue;
+        } else {
+            return false;
+        }
+    }
+
+    starts_with_digit && saw_digit && saw_dot
+}
+
 /// Infers tag colors, rewrites `lang`'s text bundles, and writes the changed
 /// `.txt` files under `out_dir`, printing one line per file written.
 pub fn run<T: BufRead + Seek>(
@@ -40,8 +125,9 @@ pub fn run<T: BufRead + Seek>(
     out_dir: &Path,
     lang: &str,
     damage_colors: DamageColors,
+    user_palette: &UserPalette,
 ) {
-    let colors = color_map(dbs);
+    let colors = color_map(dbs, user_palette);
 
     if let Err(e) = std::fs::create_dir_all(out_dir) {
         eprintln!("Could not create {}: {e}", out_dir.display());
@@ -63,7 +149,7 @@ pub fn run<T: BufRead + Seek>(
                 continue;
             }
             let text = String::from_utf8_lossy(&record.data);
-            let (rewritten, colored) = recolor_file(&text, &colors, damage_colors);
+            let (rewritten, colored) = recolor_file(&text, &colors, damage_colors, user_palette);
             if colored == 0 {
                 continue;
             }
@@ -87,10 +173,13 @@ pub fn run<T: BufRead + Seek>(
 /// Builds the tag -> color-letter map for the DB-inferred item / affix tags.
 /// Damage-type Property tags aren't listed here: they're recognized by name on
 /// the fly in `recolor_file` (see `property::color_for`).
-fn color_map<T: BufRead + Seek>(dbs: &mut [Database<T>]) -> HashMap<String, char> {
+fn color_map<T: BufRead + Seek>(
+    dbs: &mut [Database<T>],
+    user_palette: &UserPalette,
+) -> HashMap<String, char> {
     infer::infer(dbs)
         .into_iter()
-        .filter_map(|(tag, info)| color::color_for(&info).map(|c| (tag, c)))
+        .filter_map(|(tag, info)| color::color_for(&info, user_palette).map(|c| (tag, c)))
         .collect()
 }
 
@@ -101,9 +190,11 @@ fn recolor_file(
     text: &str,
     colors: &HashMap<String, char>,
     damage_colors: DamageColors,
+    user_palette: &UserPalette,
 ) -> (String, usize) {
     let mut out = String::with_capacity(text.len());
     let mut colored = 0usize;
+    let mut class_values: Vec<(String, String)> = Vec::new();
     for segment in text.split_inclusive('\n') {
         let (line, eol) = split_eol(segment);
         if let Some((tag, value)) = line.split_once('=') {
@@ -111,7 +202,7 @@ fn recolor_file(
             if let Some(color) = colors
                 .get(tag)
                 .copied()
-                .or_else(|| property::color_for(tag, damage_colors))
+                .or_else(|| property::color_for(tag, damage_colors, user_palette))
             {
                 let mut new_value = apply_color(value, color);
                 // Conversion labels carry no placeholder, so the color would
@@ -119,6 +210,39 @@ fn recolor_file(
                 if tag.contains("Conversion") {
                     new_value.push_str("{^E}");
                 }
+                if new_value != value {
+                    colored += 1;
+                }
+                out.push_str(tag);
+                out.push('=');
+                out.push_str(&new_value);
+                out.push_str(eol);
+                continue;
+            }
+            if let Some(color) = property::color_other_for(tag, user_palette) {
+                let new_value = apply_color(value, color);
+                if new_value != value {
+                    colored += 1;
+                }
+                out.push_str(tag);
+                out.push('=');
+                out.push_str(&new_value);
+                out.push_str(eol);
+                continue;
+            }
+
+            if let Some((name, class_value)) = property::text_class(tag, value) {
+                // Capture localized class names and append them to class skill names later.
+                class_values.push((name, class_value));
+                out.push_str(tag);
+                out.push('=');
+                out.push_str(value);
+                out.push_str(eol);
+                continue;
+            }
+
+            if let Some(suffix) = property::text_for(tag, &class_values) {
+                let new_value = format!("{value} {suffix}");
                 if new_value != value {
                     colored += 1;
                 }

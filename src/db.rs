@@ -6,6 +6,7 @@ use std::fs::{File, canonicalize};
 use std::io::{BufRead, BufReader, Seek};
 use std::path::PathBuf;
 
+use blake3::Hasher;
 use lib_gddb::arz::{Database, RawRecord, Record};
 
 /// Relative paths to the base game + expansion databases, in load order.
@@ -40,6 +41,95 @@ pub fn open_all() -> Vec<Database<BufReader<File>>> {
         std::process::exit(1);
     }
     dbs
+}
+
+/// Computes a combined content hash across all available game database files.
+///
+/// The hash is based on bytes from the same ARZ files used for data inference,
+/// in load order, and includes each relative path as a separator/input.
+pub fn database_hash() -> String {
+    let base = install_path();
+    let mut hasher = Hasher::new();
+    let mut saw_any = false;
+
+    for rel in DBS {
+        let path = base.join(rel);
+        if !path.exists() {
+            continue;
+        }
+        saw_any = true;
+        hasher.update(rel.as_bytes());
+        hasher.update(&[0]);
+
+        let mut f = File::open(&path).unwrap_or_else(|e| {
+            eprintln!("Could not open database file {}: {e}", path.display());
+            std::process::exit(1);
+        });
+        std::io::copy(&mut f, &mut hasher).unwrap_or_else(|e| {
+            eprintln!("Could not read database file {}: {e}", path.display());
+            std::process::exit(1);
+        });
+        hasher.update(&[0xFF]);
+    }
+
+    if !saw_any {
+        eprintln!("Could not read any database files under {}", base.display());
+        std::process::exit(1);
+    }
+
+    hasher.finalize().to_hex().to_string()
+}
+
+/// Best-effort Steam build id lookup for Grim Dawn (App ID 219990).
+///
+/// Returns None when the game was not installed via Steam, the manifest file
+/// is not reachable from the install path, or the build id key is missing.
+pub fn steam_build_id() -> Option<String> {
+    let install = install_path();
+    let mut candidates = Vec::new();
+
+    // Typical layout: <steam root>/steamapps/common/Grim Dawn
+    if let Some(common_dir) = install.parent() {
+        if common_dir
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("common"))
+        {
+            if let Some(steamapps_dir) = common_dir.parent() {
+                candidates.push(steamapps_dir.join("appmanifest_219990.acf"));
+            }
+        }
+    }
+
+    // Also try any ancestor that is itself a steamapps directory.
+    for anc in install.ancestors() {
+        if anc
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("steamapps"))
+        {
+            candidates.push(anc.join("appmanifest_219990.acf"));
+        }
+    }
+
+    for manifest in candidates {
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        if let Some(v) = parse_acf_value(&text, "buildid") {
+            return Some(v.to_string());
+        }
+    }
+
+    None
+}
+
+fn parse_acf_value<'a>(acf: &'a str, key: &str) -> Option<&'a str> {
+    for line in acf.lines() {
+        let parts: Vec<_> = line.trim().split('"').collect();
+        if parts.len() >= 4 && parts[1] == key {
+            return Some(parts[3]);
+        }
+    }
+    None
 }
 
 /// Resolves every record whose id satisfies `keep`, across all databases.

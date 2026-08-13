@@ -39,3 +39,7 @@ pub const MAROON: char = 'm';
 pub const AQUA: char = 'a';
 /// `BD94C6`
 pub const PURPLE: char = 'p';
+/// Grayish Orange (engine highlight color)
+pub const HIGHLIGHT_ORANGE: char = 'h';
+/// `00FFD2`
+pub const TEAL: char = 't';
